@@ -1,16 +1,16 @@
 {
     "p1": [
-        1029,
-        1110
+        1921,
+        643
     ],
     "p2": [
-        795,
-        924
+        1625,
+        509
     ],
     "token": "qrmai",
     "host": "0.0.0.0",
     "port": 5000,
-    "qr_route": "/",
+    "qr_route": "/qrmai",
     "cache_duration": 0,
     "standalone_mode": false,
     "decode": {
@@ -25,5 +25,7 @@
         638
     ],
     "dev_mode": false,
-    "version": "bfa024453fb5c7281d3948401446e7cb"
+    "version": "aaf636db36549ff0e7b95a88b26e41a8",
+    "wechat_bin": "/opt/wechat/wechat",
+    "wechat_url_timeout": 30
 }
