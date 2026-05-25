@@ -154,7 +154,6 @@ class LinuxMouse:
     def click(self):
         """在当前鼠标位置执行左键点击"""
         if self._is_wayland and self._wayland_mouse:
-            # Wayland: 在记录的最近坐标处点击
             self._wayland_mouse.click(self._last_x, self._last_y, "left")
         elif self._ui:
             ev_ecodes = self._ev_ecodes
@@ -169,10 +168,12 @@ class LinuxMouse:
     def move_click(self, x: int, y: int):
         """移动鼠标到 (x, y) 并点击"""
         if self._is_wayland and self._wayland_mouse:
-            # Wayland: 一次调用完成移动+点击
-            self._wayland_mouse.click(x, y, "left")
+            # 先纯移动，等合成器处理完 motion 后再发 click
+            self._wayland_mouse.click(x, y, button=None)
             self._last_x = x
             self._last_y = y
+            time.sleep(0.1)
+            self._wayland_mouse.click(x, y, "left")
         else:
             self.move_to(x, y)
             time.sleep(0.1)
@@ -613,17 +614,27 @@ def linux_qrmai_action():
     time.sleep(2)
 
     # 点击 p2（二维码消息位置 → 触发 xdg-open 将 URL 写入 FIFO）
-    logger.info(f"[Linux] 点击 p2 ({config['p2']}) 打开链接")
-    mouse.move_click(config["p2"][0], config["p2"][1])
+    # 微信对点击不敏感，若半秒内未获取到链接则补点一次
+    url = None
+    for attempt in range(2):
+        logger.info(f"[Linux] 点击 p2 ({config['p2']}) 打开链接"
+                     + (f" (第{attempt + 1}次)" if attempt > 0 else ""))
+        mouse.move_click(config["p2"][0], config["p2"][1])
+        try:
+            url = _url_queue.get(timeout=0.5 if attempt == 0 else timeout)
+            break
+        except queue.Empty:
+            if attempt == 0:
+                logger.info("[Linux] 未获取到链接，半秒后重试点击 p2")
+
+    if url is None:
+        logger.error(f"[Linux] 等待微信链接超时 ({timeout}s)")
+        return make_error_image(f"Waiting for\nWeChat link\ntimed out ({timeout}s)")
 
     try:
-        url = _url_queue.get(timeout=timeout)
         logger.info(f"[Linux] 从队列取出链接: {url[:80]}...")
         qr_data = _fetch_url_and_decode_qr(url)
         return apply_skin_to_qr(qr_data)
-    except queue.Empty:
-        logger.error(f"[Linux] 等待微信链接超时 ({timeout}s)")
-        return make_error_image(f"Waiting for\nWeChat link\ntimed out ({timeout}s)")
     except Exception as e:
         logger.error(f"[Linux] 二维码获取失败: {e}")
         return make_error_image(str(e))
