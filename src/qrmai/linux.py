@@ -41,6 +41,30 @@ def _is_wayland_session():
     )
 
 
+def _is_kde_gnome_wayland():
+    """检测当前是否在 KDE 或 GNOME 的 Wayland 环境下
+
+    wayland_automation 依赖 wlroots 的 zwlr_virtual_pointer_manager_v1 协议，
+    而 KDE (KWin) 和 GNOME (Mutter) 使用各自专属的虚拟输入协议，
+    无法兼容 wayland_automation，因此需要提前检测并回退到 uinput。
+    """
+    desktop = (
+        os.environ.get("XDG_CURRENT_DESKTOP", "")
+        or os.environ.get("XDG_SESSION_DESKTOP", "")
+        or os.environ.get("DESKTOP_SESSION", "")
+    )
+    desktop_lower = desktop.lower()
+
+    if "kde" in desktop_lower:
+        return True
+    if "gnome" in desktop_lower:
+        return True
+    if os.environ.get("KDE_FULL_SESSION", "").lower() == "true":
+        return True
+
+    return False
+
+
 class LinuxMouse:
     """Linux 鼠标操控
 
@@ -56,8 +80,8 @@ class LinuxMouse:
         self._last_x = 0
         self._last_y = 0
 
-        # ── Wayland 路径 ──
-        if _is_wayland_session():
+        # ── Wayland 路径（wlroots 系合成器：Sway, Hyprland, River 等）──
+        if _is_wayland_session() and not _is_kde_gnome_wayland():
             try:
                 from wayland_automation.mouse_controller import Mouse as WaylandMouse
 
@@ -69,6 +93,11 @@ class LinuxMouse:
                 logger.warning("wayland_automation 未安装，回退到 uinput")
             except Exception as e:
                 logger.warning(f"Wayland 虚拟指针初始化失败（{e}），回退到 uinput")
+        elif _is_kde_gnome_wayland():
+            logger.info(
+                "检测到 %s Wayland 环境，wayland_automation 不支持该合成器，使用 uinput",
+                os.environ.get("XDG_CURRENT_DESKTOP", "未知桌面环境"),
+            )
 
         # ── uinput 回退路径 ──
         try:
