@@ -32,12 +32,14 @@ last_qr_time = 0  # 上次生成二维码的时间戳
 _config = None
 _logger = None
 _qrmai_action = None
+_capture_screen = None
 
 
-def init(qrmai_action, config, logger, template_folder):
+def init(qrmai_action, capture_screen, config, logger, template_folder):
     """初始化 server 模块，注入来自 main.py 的依赖"""
-    global _qrmai_action, _config, _logger
+    global _qrmai_action, _capture_screen, _config, _logger
     _qrmai_action = qrmai_action
+    _capture_screen = capture_screen
     _config = config
     _logger = logger
     app.template_folder = template_folder
@@ -157,6 +159,42 @@ def settings():
         return "配置已更新", 200
     # GET请求时返回设置页面
     return render_template("settings.html", config=_config, is_linux=IS_LINUX)
+
+
+@app.route("/detect_positions", methods=["POST"])
+@require_auth
+def detect_positions():
+    """
+    OpenCV 自动识别 P1/P2 坐标。
+    返回 JSON: {"p1": [x, y], "p2": [x, y]} 或 {"error": "..."}
+    """
+    from qrmai.shared import detect_p1p2
+
+    if _capture_screen is None:
+        return jsonify({"error": "截图功能未初始化"}), 500
+
+    try:
+        _logger.info("[Server] 收到自动识别位置请求")
+        screen = _capture_screen()
+        p1, p2 = detect_p1p2(screen)
+
+        if p1 is None and p2 is None:
+            return jsonify({
+                "error": "未能识别任何位置，请确认 templates_img/ 目录下有模板图"
+            }), 422
+
+        result = {}
+        if p1 is not None:
+            result["p1"] = p1
+        if p2 is not None:
+            result["p2"] = p2
+
+        _logger.info(f"[Server] 识别结果: {result}")
+        return jsonify(result)
+
+    except Exception as e:
+        _logger.error(f"[Server] 自动识别失败: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/check_update", methods=["POST"])

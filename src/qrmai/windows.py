@@ -85,12 +85,36 @@ def _win_move_click(x, y):
     mouse.click(Button.left, 1)
 
 
+# ---- Windows 屏幕截图（供 OpenCV 视觉识别使用） ----
+
+def windows_capture_screen(monitor: int = 1):
+    """
+    Windows 全屏截图，返回 BGR 格式的 numpy 数组（OpenCV 原生格式）。
+
+    Args:
+        monitor: mss 监视器编号，1 = 主显示器
+
+    Returns:
+        BGR 图像 (H, W, 3) uint8
+    """
+    import numpy as np
+    import cv2
+
+    with mss() as sct:
+        region = sct.monitors[monitor]
+        sct_img = sct.grab(region)
+        bgra = np.array(sct_img, dtype=np.uint8)
+        bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
+        return bgr
+
+
 # ---- 核心二维码获取 ----
 
 def windows_qrmai_action():
     """
     Windows 版二维码获取：
     1. 定位微信窗口 → 2. 自动点击获取二维码 → 3. 截图解码 → 4. 叠加皮肤返回
+    5. 恢复鼠标到操作前位置
     """
     from PIL import Image
 
@@ -100,68 +124,80 @@ def windows_qrmai_action():
         kill_wechat_process()
         return make_error_image("Window\nnot found")
 
-    activation_success = False
-    for attempt in range(3):
-        try:
-            win32gui.ShowWindow(wechat_hwnd, win32con.SW_RESTORE)
-            win32gui.SetForegroundWindow(wechat_hwnd)
-            win32gui.SetWindowPos(
-                wechat_hwnd,
-                win32con.HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
-            )
-            activation_success = True
-            break
-        except Exception as e:
-            logger.warning(f"第 {attempt + 1} 次尝试激活窗口失败: {e}")
-            time.sleep(1)
-
-    if not activation_success:
-        logger.warning("无法激活微信窗口，将继续执行后续操作")
-
-    # 点击 p1（生成二维码按钮位置）
-    _win_move_click(config["p1"][0], config["p1"][1])
-    time.sleep(2)
-
-    # 点击 p2（二维码消息位置）
-    _win_move_click(config["p2"][0], config["p2"][1])
-
-    decoded_objects = None
+    # ── 保存操作前鼠标位置 ──
+    orig_pos = mouse.position
+    logger.info(f"[Windows] 已保存鼠标位置: {orig_pos}")
 
     try:
-        time.sleep(0.2)
-        win32gui.ShowWindow(wechat_hwnd, win32con.SW_MINIMIZE)
-    except Exception:
-        pass
+        activation_success = False
+        for attempt in range(3):
+            try:
+                win32gui.ShowWindow(wechat_hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(wechat_hwnd)
+                win32gui.SetWindowPos(
+                    wechat_hwnd,
+                    win32con.HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
+                )
+                activation_success = True
+                break
+            except Exception as e:
+                logger.warning(f"第 {attempt + 1} 次尝试激活窗口失败: {e}")
+                time.sleep(1)
 
-    for i in range(config["decode"]["retry_count"]):
-        time.sleep(config["decode"]["time"] / config["decode"]["retry_count"])
+        if not activation_success:
+            logger.warning("无法激活微信窗口，将继续执行后续操作")
 
-        with mss() as sct:
-            screenshot = sct.grab(sct.monitors[1])
-            image = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+        # 点击 p1（生成二维码按钮位置）
+        _win_move_click(config["p1"][0], config["p1"][1])
+        time.sleep(2)
 
-        decoded_objects = decode(image)
+        # 点击 p2（二维码消息位置）
+        _win_move_click(config["p2"][0], config["p2"][1])
 
-        if decoded_objects and len(decoded_objects) > 0:
-            break
-        else:
-            if i == config["decode"]["retry_count"] - 1:
-                kill_wechat_process()
-                return make_error_image("Unable\nto load\nQRCode\n(Timeout)")
-            logger.info(
-                f"二维码解码失败 过{config['decode']['time'] / config['decode']['retry_count']}s后重试 "
-                f"({i + 1}/{config['decode']['retry_count']})"
-            )
+        decoded_objects = None
 
-    qr_data = decoded_objects[0].data.decode("utf-8")
-    result = apply_skin_to_qr(qr_data)
-    kill_wechat_process()
-    return result
+        try:
+            time.sleep(0.2)
+            win32gui.ShowWindow(wechat_hwnd, win32con.SW_MINIMIZE)
+        except Exception:
+            pass
+
+        for i in range(config["decode"]["retry_count"]):
+            time.sleep(config["decode"]["time"] / config["decode"]["retry_count"])
+
+            with mss() as sct:
+                screenshot = sct.grab(sct.monitors[1])
+                image = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+
+            decoded_objects = decode(image)
+
+            if decoded_objects and len(decoded_objects) > 0:
+                break
+            else:
+                if i == config["decode"]["retry_count"] - 1:
+                    kill_wechat_process()
+                    return make_error_image("Unable\nto load\nQRCode\n(Timeout)")
+                logger.info(
+                    f"二维码解码失败 过{config['decode']['time'] / config['decode']['retry_count']}s后重试 "
+                    f"({i + 1}/{config['decode']['retry_count']})"
+                )
+
+        qr_data = decoded_objects[0].data.decode("utf-8")
+        result = apply_skin_to_qr(qr_data)
+        kill_wechat_process()
+        return result
+    finally:
+        # ── 恢复鼠标到操作前位置 ──
+        try:
+            mouse.position = orig_pos
+            logger.info(f"[Windows] 鼠标已还原到 {orig_pos}")
+        except Exception as e:
+            logger.warning(f"[Windows] 鼠标还原失败: {e}")
 
 
 # 统一入口

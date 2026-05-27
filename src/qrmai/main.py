@@ -26,7 +26,7 @@ from qrmai.shared import (
 if IS_WINDOWS:
     from qrmai.windows import qrmai_action
 elif IS_LINUX:
-    from qrmai.linux import qrmai_action, linux_setup
+    from qrmai.linux import qrmai_action, linux_setup, linux_shutdown
 else:
     raise RuntimeError(f"不支持的操作系统: {sys.platform}")
 
@@ -66,8 +66,14 @@ def main():
     # 初始化 server 模块，注入依赖
     from qrmai import server
 
+    # 注入平台对应的截图函数
+    if IS_LINUX:
+        from qrmai.linux import linux_capture_screen as capture_screen
+    else:
+        from qrmai.windows import windows_capture_screen as capture_screen
+
     template_folder = resource_path("templates")
-    server.init(qrmai_action, config, logger, template_folder)
+    server.init(qrmai_action, capture_screen, config, logger, template_folder)
 
     # =========================================================================
     # Linux: 启动时初始化劫持环境并启动微信
@@ -87,9 +93,13 @@ def main():
     else:
         open_webbrowser(f'http://localhost:{config["port"]}/login')
 
-    server.app.run(
-        host=config["host"], port=config["port"], debug=config["dev_mode"]
-    )
+    try:
+        server.app.run(
+            host=config["host"], port=config["port"], debug=config["dev_mode"]
+        )
+    finally:
+        if IS_LINUX:
+            linux_shutdown()
 
 
 if __name__ == "__main__":

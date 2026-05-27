@@ -149,6 +149,14 @@
                         <mdui-text-field label="P2坐标(X,Y)" name="p2" value="{{ config.get('p2', [0, 0])|join(',') }}"
                             helper="生成后的二维码的消息的位置"></mdui-text-field>
 
+                        <!-- OpenCV 自动识别按钮 + 状态提示 -->
+                        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+                            <mdui-button id="autoDetectBtn" variant="outlined" type="button">
+                                🔍 自动识别位置
+                            </mdui-button>
+                            <span id="detectStatus" style="font-size: 14px; color: #888;"></span>
+                        </div>
+
                         <mdui-button type="submit" variant="filled">保存位置设置</mdui-button>
                     </form>
                 </div>
@@ -265,6 +273,60 @@
                         });
                     });
             });
+        });
+
+        // OpenCV 自动识别位置按钮
+        const autoDetectBtn = document.getElementById('autoDetectBtn');
+        const detectStatus = document.getElementById('detectStatus');
+        const p1Field = document.querySelector('mdui-text-field[name="p1"]');
+        const p2Field = document.querySelector('mdui-text-field[name="p2"]');
+
+        autoDetectBtn.addEventListener('click', function () {
+            autoDetectBtn.disabled = true;
+            autoDetectBtn.textContent = '识别中...';
+            detectStatus.textContent = '正在截图并识别，请稍候...';
+            detectStatus.style.color = '#888';
+
+            fetch('/detect_positions', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    autoDetectBtn.disabled = false;
+                    autoDetectBtn.textContent = '🔍 自动识别位置';
+
+                    if (data.error) {
+                        detectStatus.textContent = '✗ ' + data.error;
+                        detectStatus.style.color = '#e53935';
+                        return;
+                    }
+
+                    // 填充识别到的坐标
+                    if (data.p1) {
+                        p1Field.value = data.p1.join(',');
+                    }
+                    if (data.p2) {
+                        p2Field.value = data.p2.join(',');
+                    }
+
+                    const parts = [];
+                    if (data.p1) parts.push('P1=[' + data.p1.join(',') + ']');
+                    if (data.p2) parts.push('P2=[' + data.p2.join(',') + ']');
+                    detectStatus.textContent = '✓ 已识别: ' + parts.join('  ');
+                    detectStatus.style.color = '#43a047';
+
+                    // 提示用户确认并保存
+                    mdui.snackbar({
+                        message: '坐标已填入，请核对后点击「保存位置设置」',
+                        placement: 'top',
+                        duration: 4000,
+                    });
+                })
+                .catch(error => {
+                    autoDetectBtn.disabled = false;
+                    autoDetectBtn.textContent = '🔍 自动识别位置';
+                    detectStatus.textContent = '✗ 网络错误: ' + error.message;
+                    detectStatus.style.color = '#e53935';
+                    console.error('detect_positions error:', error);
+                });
         });
 
         // 登出按钮事件

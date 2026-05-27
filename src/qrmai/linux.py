@@ -10,7 +10,7 @@ import time
 import logging
 import threading
 import queue
-import atexit
+
 import shutil
 import tempfile
 import subprocess
@@ -194,18 +194,21 @@ class LinuxMouse:
         else:
             logger.error("鼠标设备未初始化，无法点击")
 
-    def move_click(self, x: int, y: int):
-        """移动鼠标到 (x, y) 并点击"""
+    def move_click(self, x: int, y: int, delay: float = 0.1):
+        """移动鼠标到 (x, y) 并点击
+
+        Args:
+            delay: 移动完成后等 delay 秒再点击（默认 0.1s）。
+        """
         if self._is_wayland and self._wayland_mouse:
-            # 先纯移动，等合成器处理完 motion 后再发 click
             self._wayland_mouse.click(x, y, button=None)
             self._last_x = x
             self._last_y = y
-            time.sleep(0.1)
+            time.sleep(delay)
             self._wayland_mouse.click(x, y, "left")
         else:
             self.move_to(x, y)
-            time.sleep(0.1)
+            time.sleep(delay)
             self.click()
 
     def close(self):
@@ -377,6 +380,24 @@ _wechat_recovered = False  # 标记是否从崩溃中恢复的微信进程
 _STATE_FILE = Path(tempfile.gettempdir()) / "qrmai_state.json"
 
 
+def _is_wechat_alive():
+    """检查 _wechat_proc 是否仍在运行
+
+    兼容 subprocess.Popen（首次启动）和 psutil.Process（崩溃恢复）两种类型。
+    """
+    global _wechat_proc
+    if _wechat_proc is None:
+        return False
+    # 首次启动时 _wechat_proc 是 subprocess.Popen
+    if isinstance(_wechat_proc, subprocess.Popen):
+        return _wechat_proc.poll() is None
+    # 崩溃恢复时 _wechat_proc 是 psutil.Process
+    try:
+        return _wechat_proc.is_running()
+    except psutil.NoSuchProcess:
+        return False
+
+
 def _save_state():
     """保存当前劫持环境状态，用于崩溃后恢复"""
     if _wechat_proc is None or _hacked_temp_dir is None:
@@ -520,11 +541,14 @@ def _launch_wechat_hacked():
     env["PATH"] = f"{_hacked_fake_bin_dir}:{env.get('PATH', '')}"
 
     logger.info(f"[Linux] 正在启动微信: dbus-run-session {WECHAT_BIN}")
+    # start_new_session=True → fork + setsid()，将微信进程放入独立的
+    # 进程组和会话中，使其脱离 QRmai 进程树，脚本退出时不会被系统连带杀死。
     _wechat_proc = subprocess.Popen(
         ["dbus-run-session", WECHAT_BIN],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     # 保存状态以便崩溃后恢复
     _save_state()
@@ -582,21 +606,40 @@ def _ensure_wechat_running():
     _launch_wechat_hacked()
 
 
-def _cleanup_hacked_environment():
-    """清理持久化劫持环境（程序退出时调用）"""
+def _cleanup_hacked_environment(keep=False):
+    """清理持久化劫持环境（程序退出时调用）
+
+    Args:
+        keep: 如果为 True，保留微信进程、临时目录和状态文件，
+              以便下次启动时通过 _try_recover_state() 自动链接。
+    """
     global _wechat_proc
     _hacked_stop_event.set()
 
-    # 正常退出时删除状态文件，不再恢复
+    if keep:
+        # 保留模式：更新状态文件、不杀进程、不删目录
+        logger.info("[Linux] 保留 hacked-wechat 环境以供下次启动复用")
+        _save_state()
+        return
+
+    # ── 完整清理模式 ──
+    # 删除状态文件，避免下次启动误恢复已退出进程的残留
     _STATE_FILE.unlink(missing_ok=True)
 
-    if _wechat_proc is not None and _wechat_proc.poll() is None:
+    if _is_wechat_alive():
+        # ── 微信仍在运行 ──
         logger.info("[Linux] 正在终止微信进程...")
         _wechat_proc.terminate()
         try:
             _wechat_proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _wechat_proc.kill()
+        except psutil.TimeoutExpired:
+            _wechat_proc.kill()
+
+    # 额外确保所有微信进程都被终止（处理 dbus-run-session 退出但
+    # 微信进程幸存的情况）
+    linux_kill_wechat_process()
 
     if _hacked_temp_dir is not None:
         try:
@@ -606,6 +649,39 @@ def _cleanup_hacked_environment():
             pass
 
 
+def linux_shutdown():
+    """Linux 退出时调用：询问用户是否保留 hacked-wechat 环境
+
+    由 main.py 在 server.app.run() 的 finally 块中调用，
+    确保在 Flask 正常退出后执行用户交互。
+    """
+    print("")
+    print("=" * 55)
+    print("  QRmai 正在退出...")
+    print("=" * 55)
+
+    if sys.stdin.isatty():
+        answer = (
+            input(
+                "  是否保留 hacked-wechat 环境以便下次启动自动链接？\n"
+                "  （保留后微信将继续运行，下次启动 QRmai 时将自动复用）[y/N] "
+            )
+            .strip()
+            .lower()
+        )
+    else:
+        logger.info("[Linux] 非交互模式，将完整清理劫持环境")
+        answer = "n"
+
+    if answer == "y":
+        _cleanup_hacked_environment(keep=True)
+        logger.info("[Linux] hacked-wechat 环境已保留，下次启动时将自动链接")
+        print("  ✅ hacked-wechat 环境已保留，下次启动将自动链接")
+    else:
+        _cleanup_hacked_environment(keep=False)
+        logger.info("[Linux] 劫持环境已完全清理")
+
+
 # =============================================================================
 # Linux 版 qrmai_action
 # =============================================================================
@@ -613,16 +689,40 @@ def _cleanup_hacked_environment():
 def linux_qrmai_action():
     """
     Linux 版二维码获取：
-    1. 获取鼠标实例，确认微信在运行
+    1. 保存鼠标位置 → 获取鼠标实例，确认微信在运行
     2. 点击 p1（微信二维码按钮）→ 等待 → 点击 p2（二维码消息）
        （p2 点击触发 xdg-open → FIFO → URL 入队）
     3. 从队列取出链接 → 访问页面 → 解析 MAID 图片 → pyzbar 解码
     4. 叠加皮肤 → 返回二维码图像
+    5. 恢复鼠标到操作前位置
     """
     timeout = config.get("wechat_url_timeout", 30)
 
+    # ── 保存操作前鼠标位置 ──
+    orig_x, orig_y = 0, 0
+    try:
+        if _is_wayland_session():
+            from wayland_automation import mouse_position_generator
+
+            gen = mouse_position_generator(interval=0.05)
+            try:
+                pos = next(gen)
+                if pos:
+                    orig_x, orig_y = pos
+                    logger.info(f"[Linux] 已保存鼠标位置: ({orig_x}, {orig_y})")
+            finally:
+                gen.close()
+        else:
+            from pynput.mouse import Controller as PynputMouse
+
+            pos = PynputMouse().position
+            orig_x, orig_y = pos
+            logger.info(f"[Linux] 已保存鼠标位置: ({orig_x}, {orig_y})")
+    except Exception as e:
+        logger.warning(f"[Linux] 无法获取鼠标位置 ({e})，操作后不会还原")
+
     # 检查微信是否仍在运行
-    if _wechat_proc is not None and _wechat_proc.poll() is not None:
+    if _wechat_proc is not None and not _is_wechat_alive():
         logger.warning("[Linux] 微信进程已退出，正在重新启动...")
         _launch_wechat_hacked()
         time.sleep(3)  # 等微信窗口就绪
@@ -648,7 +748,7 @@ def linux_qrmai_action():
     for attempt in range(2):
         logger.info(f"[Linux] 点击 p2 ({config['p2']}) 打开链接"
                      + (f" (第{attempt + 1}次)" if attempt > 0 else ""))
-        mouse.move_click(config["p2"][0], config["p2"][1])
+        mouse.move_click(config["p2"][0], config["p2"][1], delay=0.5)
         try:
             url = _url_queue.get(timeout=0.5 if attempt == 0 else timeout)
             break
@@ -656,17 +756,25 @@ def linux_qrmai_action():
             if attempt == 0:
                 logger.info("[Linux] 未获取到链接，半秒后重试点击 p2")
 
-    if url is None:
-        logger.error(f"[Linux] 等待微信链接超时 ({timeout}s)")
-        return make_error_image(f"Waiting for\nWeChat link\ntimed out ({timeout}s)")
-
     try:
+        if url is None:
+            logger.error(f"[Linux] 等待微信链接超时 ({timeout}s)")
+            return make_error_image(f"Waiting for\nWeChat link\ntimed out ({timeout}s)")
+
         logger.info(f"[Linux] 从队列取出链接: {url[:80]}...")
         qr_data = _fetch_url_and_decode_qr(url)
         return apply_skin_to_qr(qr_data)
     except Exception as e:
         logger.error(f"[Linux] 二维码获取失败: {e}")
         return make_error_image(str(e))
+    finally:
+        # ── 恢复鼠标到操作前位置 ──
+        if orig_x != 0 or orig_y != 0:
+            try:
+                mouse.move_to(orig_x, orig_y)
+                logger.info(f"[Linux] 鼠标已还原到 ({orig_x}, {orig_y})")
+            except Exception as e:
+                logger.warning(f"[Linux] 鼠标还原失败: {e}")
 
 
 # 统一入口
@@ -674,13 +782,106 @@ qrmai_action = linux_qrmai_action
 
 
 # =============================================================================
+# Linux 屏幕截图（供 OpenCV 视觉识别使用）
+# =============================================================================
+
+def linux_capture_screen() -> "np.ndarray":
+    """
+    Linux 全屏截图，返回 BGR 格式的 numpy 数组（OpenCV 原生格式）。
+
+    - Wayland → grim 命令
+    - X11    → mss 库
+
+    Returns:
+        BGR 图像 (H, W, 3) uint8
+    """
+    import numpy as np
+
+    if _is_wayland_session():
+        return _capture_screen_grim()
+    else:
+        return _capture_screen_mss()
+
+
+def _capture_screen_grim() -> "np.ndarray":
+    """
+    使用 grim 命令截图（Wayland 环境）。
+    grim 是 wlroots-based Wayland 合成器的标准截图工具。
+
+    Returns:
+        BGR 图像 (H, W, 3) uint8
+    """
+    import numpy as np
+    import cv2
+
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="qrmai_grim_")
+        os.close(fd)
+
+        subprocess.run(
+            ["grim", tmp_path],
+            check=True,
+            timeout=10,
+            capture_output=True,
+        )
+
+        img = cv2.imread(tmp_path, cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError("cv2.imread 返回 None，截图文件可能为空或损坏")
+
+        logger.debug(f"[Linux] grim 截图成功: {img.shape[1]}x{img.shape[0]}")
+        return img
+
+    except FileNotFoundError:
+        raise RuntimeError(
+            "未找到 grim 命令，请安装: sudo apt install grim  (Debian/Ubuntu) "
+            "或 sudo pacman -S grim  (Arch)"
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode().strip() if e.stderr else ""
+        raise RuntimeError(f"grim 截图失败 (code={e.returncode}): {stderr}")
+    finally:
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _capture_screen_mss(monitor: int = 1) -> "np.ndarray":
+    """
+    使用 mss 库截图（X11 环境）。
+
+    Args:
+        monitor: mss 监视器编号，1 = 主显示器
+
+    Returns:
+        BGR 图像 (H, W, 3) uint8
+    """
+    import numpy as np
+    import cv2
+    from mss import mss
+
+    with mss() as sct:
+        region = sct.monitors[monitor]
+        sct_img = sct.grab(region)
+        bgra = np.array(sct_img, dtype=np.uint8)
+        bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
+        return bgr
+
+
+# =============================================================================
 # 初始化辅助（供 main.py 调用）
 # =============================================================================
 
 def linux_setup():
-    """Linux 启动时的初始化：建立劫持环境 + 启动微信 + 注册退出清理"""
+    """Linux 启动时的初始化：建立劫持环境 + 启动微信
+
+    退出清理由 main.py 通过 try/finally 调用 linux_shutdown() 完成，
+    不再使用 atexit，以便在退出前与用户交互（是否保留 hacked-wechat）。
+    """
     logger.info("[Linux] 正在初始化劫持环境...")
     _setup_hacked_environment()
-    atexit.register(_cleanup_hacked_environment)
     _ensure_wechat_running()
     logger.info("[Linux] 劫持环境初始化完成")

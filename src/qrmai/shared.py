@@ -109,6 +109,9 @@ def get_default_config():
         "custom_skin_qrcode_size": 576,
         "custom_skin_qrcode_point": [106, 638],
         "dev_mode": False,
+        # OpenCV 视觉识别配置
+        "auto_detect_p1p2": False,
+        "template_threshold": 0.8,
         # Linux 专用配置
         "wechat_bin": "/opt/wechat/wechat",
         "wechat_url_timeout": 30,
@@ -235,3 +238,241 @@ def make_error_image(message: str) -> BytesIO:
     im.save(img_io, format="PNG")
     img_io.seek(0)
     return img_io
+
+
+# =============================================================================
+# OpenCV 视觉识别 — P1 / P2 自动定位
+# =============================================================================
+
+_TEMPLATES_DIR = resource_path("templates_img")
+
+
+def _get_template_path(name: str):
+    """按优先级查找模板图：用户模板 > 开发者模板，均无则返回 None"""
+    user_path = os.path.join(_TEMPLATES_DIR, f"{name}_user.png")
+    dev_path = os.path.join(_TEMPLATES_DIR, f"{name}.png")
+
+    if os.path.isfile(user_path):
+        logger.info(f"[OpenCV] 使用用户模板: {user_path}")
+        return user_path
+    elif os.path.isfile(dev_path):
+        logger.info(f"[OpenCV] 使用开发者模板: {dev_path}")
+        return dev_path
+    else:
+        logger.warning(
+            f"[OpenCV] 未找到模板图 {name}（已检查 {user_path} 和 {dev_path}）"
+        )
+        return None
+
+
+def _image_to_bgr(image):
+    """
+    将多种输入格式统一转换为 OpenCV BGR ndarray。
+    支持: ndarray / BytesIO / PIL Image / 文件路径 str
+    """
+    import numpy as np
+    import cv2
+
+    if isinstance(image, np.ndarray):
+        arr = image
+    elif isinstance(image, BytesIO):
+        image.seek(0)
+        arr = np.frombuffer(image.read(), dtype=np.uint8)
+        arr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    elif isinstance(image, str):
+        arr = cv2.imread(image, cv2.IMREAD_COLOR)
+    else:
+        try:
+            from PIL import Image
+            if isinstance(image, Image.Image):
+                arr = np.array(image.convert("RGB"))
+                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            else:
+                raise TypeError(f"不支持的图像类型: {type(image)}")
+        except ImportError:
+            raise TypeError(f"不支持的图像类型: {type(image)}")
+
+    if arr is None or arr.size == 0:
+        raise ValueError("图像数据为空")
+
+    if len(arr.shape) == 2:
+        arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    elif arr.shape[2] == 4:
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+
+    return arr
+
+
+def _match_template_multiscale(
+    screen,
+    template_path,
+    threshold=0.8,
+    scales=(0.6, 0.8, 1.0, 1.2, 1.5),
+):
+    """
+    多尺度模板匹配。在不同缩放比例下查找模板，返回最佳匹配的中心坐标。
+
+    适应不同屏幕分辨率 / DPI 缩放下的 UI 元素尺寸差异。
+
+    Returns:
+        [x, y] 或 None
+    """
+    import cv2
+
+    template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+    if template is None:
+        logger.error(f"[OpenCV] 无法读取模板图: {template_path}")
+        return None
+
+    best_val = -1.0
+    best_loc = None
+    best_scale = 1.0
+    best_size = template.shape[:2]
+
+    for scale in scales:
+        tw = int(template.shape[1] * scale)
+        th = int(template.shape[0] * scale)
+        if tw < 10 or th < 10 or tw > screen.shape[1] or th > screen.shape[0]:
+            continue
+
+        scaled = cv2.resize(template, (tw, th), interpolation=cv2.INTER_LINEAR)
+        result = cv2.matchTemplate(screen, scaled, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+        logger.debug(f"[OpenCV] 缩放 {scale:.1f}x -> max_val={max_val:.3f}")
+
+        if max_val > best_val:
+            best_val = max_val
+            best_loc = max_loc
+            best_scale = scale
+            best_size = (th, tw)
+
+    if best_loc is None or best_val < threshold:
+        logger.warning(
+            f"[OpenCV] 模板 {os.path.basename(template_path)} 匹配度不足 "
+            f"(best={best_val:.3f} < {threshold})"
+        )
+        return None
+
+    center_x = best_loc[0] + best_size[1] // 2
+    center_y = best_loc[1] + best_size[0] // 2
+
+    logger.info(
+        f"[OpenCV] 匹配成功: {os.path.basename(template_path)} "
+        f"-> [{center_x}, {center_y}] "
+        f"(scale={best_scale:.1f}x, confidence={best_val:.3f})"
+    )
+    return [center_x, center_y]
+
+
+def detect_p1p2(image, threshold=None):
+    """
+    从屏幕截图中自动识别 P1 / P2 的坐标。
+
+    Args:
+        image:     屏幕截图，支持 ndarray / BytesIO / PIL Image / 文件路径
+        threshold: 匹配置信度阈值，默认使用 config 中的 template_threshold
+
+    Returns:
+        (p1, p2) — 各自为 [x, y] 或 None
+
+    Example:
+        p1, p2 = detect_p1p2(screenshot_bytes)
+        # p1 = [1788, 654], p2 = [1427, 559]
+    """
+    if threshold is None:
+        threshold = config.get("template_threshold", 0.8)
+
+    screen = _image_to_bgr(image)
+    logger.debug(
+        f"[OpenCV] 开始识别 P1/P2，屏幕尺寸: {screen.shape[1]}x{screen.shape[0]}"
+    )
+
+    p1 = None
+    p1_template = _get_template_path("p1")
+    if p1_template:
+        p1 = _match_template_multiscale(screen, p1_template, threshold)
+    else:
+        logger.warning("[OpenCV] 无 P1 模板图，跳过 P1 识别")
+
+    p2 = None
+    p2_template = _get_template_path("p2")
+    if p2_template:
+        p2 = _match_template_multiscale(screen, p2_template, threshold)
+    else:
+        logger.warning("[OpenCV] 无 P2 模板图，跳过 P2 识别")
+
+    return p1, p2
+
+
+def resolve_p1p2(capture_screen):
+    """
+    解析 P1/P2 点击坐标，供 qrmai_action 调用。
+
+    优先级：
+      1. config.json 中的 p1 / p2（非空时直接使用）
+      2. OpenCV 自动识别
+
+    Args:
+        capture_screen: 平台截图函数，返回 BGR ndarray
+
+    Returns:
+        (p1, p2) — 各自为 [x, y]
+
+    Raises:
+        RuntimeError: 两种方式均无法获取坐标
+    """
+    p1_cfg = config.get("p1")
+    p2_cfg = config.get("p2")
+
+    # 检查 config 中是否有有效坐标（非 None、非空列表、长度为 2）
+    p1_valid = (
+        p1_cfg is not None
+        and isinstance(p1_cfg, (list, tuple))
+        and len(p1_cfg) == 2
+        and all(isinstance(v, (int, float)) for v in p1_cfg)
+    )
+    p2_valid = (
+        p2_cfg is not None
+        and isinstance(p2_cfg, (list, tuple))
+        and len(p2_cfg) == 2
+        and all(isinstance(v, (int, float)) for v in p2_cfg)
+    )
+
+    if p1_valid and p2_valid:
+        logger.info(f"[OpenCV] 使用 config 坐标: P1={p1_cfg}, P2={p2_cfg}")
+        return list(p1_cfg), list(p2_cfg)
+
+    # config 坐标不完整，尝试 OpenCV 识别
+    logger.info(
+        "[OpenCV] config 坐标不完整 (P1={}, P2={})，尝试自动识别".format(
+            "有效" if p1_valid else "无效",
+            "有效" if p2_valid else "无效",
+        )
+    )
+
+    screen = capture_screen()
+    detected_p1, detected_p2 = detect_p1p2(screen)
+
+    if detected_p1 is None:
+        if p1_valid:
+            detected_p1 = list(p1_cfg)
+            logger.warning(f"[OpenCV] P1 识别失败，回退到 config: {detected_p1}")
+        else:
+            raise RuntimeError(
+                "无法获取 P1 坐标：config 为空且 OpenCV 识别失败，"
+                "请在 config.json 中设置 p1 或添加模板图到 templates_img/"
+            )
+
+    if detected_p2 is None:
+        if p2_valid:
+            detected_p2 = list(p2_cfg)
+            logger.warning(f"[OpenCV] P2 识别失败，回退到 config: {detected_p2}")
+        else:
+            raise RuntimeError(
+                "无法获取 P2 坐标：config 为空且 OpenCV 识别失败，"
+                "请在 config.json 中设置 p2 或添加模板图到 templates_img/"
+            )
+
+    logger.info(f"[OpenCV] 最终坐标: P1={detected_p1}, P2={detected_p2}")
+    return detected_p1, detected_p2
