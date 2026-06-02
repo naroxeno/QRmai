@@ -36,6 +36,8 @@
 
 ### 方式二：源码部署（适合开发者）
 
+#### Windows
+
 1. **安装 Python3**
    如果尚未安装，请从 [Python官网](https://www.python.org/downloads/) 下载安装
 
@@ -54,7 +56,64 @@
    ```
 
 4. **访问服务**
-   浏览器打开 `http://127.0.0.1:5000/?token={你在配置文件中设置的token}`
+   浏览器打开 `http://127.0.0.1:5000/?token=你的token`
+
+#### Linux
+
+1. **安装系统依赖**
+
+   Debian/Ubuntu:
+   ```bash
+   sudo apt install python3 python3-pip wayland-utils
+   ```
+
+   Arch Linux:
+   ```bash
+   sudo pacman -S python python-pip wayland-utils
+   ```
+
+   Fedora:
+   ```bash
+   sudo dnf install python3 python3-pip wayland-utils
+   ```
+
+   > `wayland-utils` 提供 Wayland 信息查询工具，是 `wayland_automation` 的依赖项。
+
+2. **配置 uinput 权限**（鼠标操控必需）
+
+   ```bash
+   # 将当前用户加入 input 组（推荐，重启后生效）
+   sudo usermod -aG input $USER
+
+   # 或临时赋予权限（重启后失效）
+   sudo chmod 666 /dev/uinput
+   ```
+
+3. **安装 Python 依赖**
+
+   ```bash
+   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+   ```
+
+4. **启动服务**
+
+   ```bash
+   python main.py
+   ```
+
+5. **访问服务**
+   浏览器打开 `http://127.0.0.1:5000/?token=你的token`
+
+#### Wayland 桌面环境兼容性
+
+| 合成器 | 鼠标操控方式 | 备注 |
+|--------|-------------|------|
+| Sway / Hyprland / River 等 wlroots 系 | `wayland_automation` 虚拟指针 | 推荐，支持绝对坐标 |
+| KDE Plasma (KWin) | uinput 内核级 | 自动检测并回退 |
+| GNOME (Mutter) | uinput 内核级 | 自动检测并回退 |
+| X11 会话 | uinput 内核级 | 自动回退 |
+
+> KDE 和 GNOME 使用各自专属的虚拟输入协议，与 `wayland_automation` 不兼容。程序会在启动时自动检测当前桌面环境，不兼容时回退到 uinput 方式。
 
 ## 🌐 内网穿透 - 互联网访问
 

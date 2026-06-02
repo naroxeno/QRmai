@@ -1,0 +1,35 @@
+[project]
+name = "qrmai"
+version = "3.0.0"
+description = "QRmai - 舞萌/中二二维码自动获取工具"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=2.0",
+    "pynput>=1.7",
+    "pygetwindow>=0.0.9",
+    "qrcode[pil]>=7.3",
+    "pillow>=8.0",
+    "mss>=6.1",
+    "pyzbar>=0.1",
+    "psutil>=5.8",
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    "pywin32>=227; sys_platform == 'win32'",
+    "evdev>=1.0; sys_platform == 'linux'",
+    "wayland-automation>=0.2.7; sys_platform == 'linux'",
+]
+
+[project.scripts]
+qrmai = "qrmai.main:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.0",
+]
