@@ -7,7 +7,6 @@ import os
 import sys
 import json
 import time
-import logging
 import threading
 import queue
 
@@ -16,11 +15,13 @@ import tempfile
 import subprocess
 import urllib.request
 import urllib.error
-import urllib.parse
+from urllib.parse import urljoin
 import re
 from pathlib import Path
 from io import BytesIO
 
+from PIL import Image
+from pyzbar.pyzbar import decode
 import psutil
 
 from .shared import config, logger, apply_skin_to_qr, make_error_image
@@ -33,11 +34,11 @@ WECHAT_BIN = config.get("wechat_bin", "/opt/wechat/wechat")
 # Linux 鼠标控制（Wayland 优先 → uinput 回退）
 # =============================================================================
 
+
 def _is_wayland_session():
     """检测当前是否运行在 Wayland 会话下"""
-    return (
-        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
-        or bool(os.environ.get("WAYLAND_DISPLAY"))
+    return os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or bool(
+        os.environ.get("WAYLAND_DISPLAY")
     )
 
 
@@ -74,8 +75,8 @@ class LinuxMouse:
     """
 
     def __init__(self):
-        self._wayland_mouse = None   # wayland_automation Mouse 实例
-        self._ui = None              # evdev UInput 实例
+        self._wayland_mouse = None  # wayland_automation Mouse 实例
+        self._ui = None  # evdev UInput 实例
         self._is_wayland = False
         self._last_x = 0
         self._last_y = 0
@@ -87,7 +88,9 @@ class LinuxMouse:
 
                 self._wayland_mouse = WaylandMouse()
                 self._is_wayland = True
-                logger.info("已初始化 Wayland 虚拟指针（zwlr_virtual_pointer_manager_v1）")
+                logger.info(
+                    "已初始化 Wayland 虚拟指针（zwlr_virtual_pointer_manager_v1）"
+                )
                 return
             except ImportError:
                 logger.warning("wayland_automation 未安装，回退到 uinput")
@@ -134,6 +137,7 @@ class LinuxMouse:
         if _is_wayland_session():
             try:
                 from wayland_automation import mouse_position_generator
+
                 gen = mouse_position_generator(interval=0.05)
                 try:
                     pos = next(gen)
@@ -148,7 +152,9 @@ class LinuxMouse:
             mice = [InputDevice(path) for path in list_devices()]
             for dev in mice:
                 caps = dev.capabilities()
-                if ev_ecodes.EV_REL in caps and ev_ecodes.BTN_LEFT in caps.get(ev_ecodes.EV_KEY, []):
+                if ev_ecodes.EV_REL in caps and ev_ecodes.BTN_LEFT in caps.get(
+                    ev_ecodes.EV_KEY, []
+                ):
                     dev.close()
                     break
             return 0, 0
@@ -215,7 +221,7 @@ class LinuxMouse:
         """关闭鼠标设备"""
         if self._wayland_mouse:
             try:
-                if hasattr(self._wayland_mouse, 'sock') and self._wayland_mouse.sock:
+                if hasattr(self._wayland_mouse, "sock") and self._wayland_mouse.sock:
                     self._wayland_mouse.sock.close()
             except Exception:
                 pass
@@ -241,6 +247,7 @@ def _get_linux_mouse():
 # Linux 进程管理
 # =============================================================================
 
+
 def linux_kill_wechat_process():
     """杀死 Linux 下的微信进程（不包括 WeChatEx 内置浏览器进程）"""
     killed_any = False
@@ -261,6 +268,7 @@ def linux_kill_wechat_process():
 # =============================================================================
 # hacked-wechat 核心逻辑
 # =============================================================================
+
 
 def _setup_fake_xdg_open(fake_bin_dir: Path, fifo_path: Path):
     """在工作目录内动态创建伪装的 xdg-open 脚本，拦截 HTTP(S) 链接写入 FIFO"""
@@ -286,15 +294,12 @@ fi
 # URL 获取与二维码解码
 # =============================================================================
 
+
 def _fetch_url_and_decode_qr(url: str) -> str:
     """
     访问微信打开的链接，解析 HTML，下载 MAID 开头的二维码图像，
     使用 pyzbar 解码后返回二维码数据字符串。
     """
-    from urllib.parse import urljoin
-    from pyzbar.pyzbar import decode
-    from PIL import Image
-
     logger.info(f"[Linux] 正在请求页面: {url[:80]}...")
 
     req = urllib.request.Request(
@@ -571,9 +576,7 @@ def _ensure_wechat_running():
     existing = _find_existing_wechat()
 
     if existing:
-        logger.warning(
-            f"检测到已有微信进程运行中 (PID: {existing.info['pid']})"
-        )
+        logger.warning(f"检测到已有微信进程运行中 (PID: {existing.info['pid']})")
         print("")
         print("=" * 55)
         print("  ⚠️  检测到微信已在运行")
@@ -598,8 +601,7 @@ def _ensure_wechat_running():
             time.sleep(1)
         else:
             logger.warning(
-                "请确保当前微信进程在 QRmai 劫持环境下启动，"
-                "否则二维码获取可能失败。"
+                "请确保当前微信进程在 QRmai 劫持环境下启动，否则二维码获取可能失败。"
             )
             return
 
@@ -686,6 +688,7 @@ def linux_shutdown():
 # Linux 版 qrmai_action
 # =============================================================================
 
+
 def linux_qrmai_action():
     """
     Linux 版二维码获取：
@@ -746,8 +749,10 @@ def linux_qrmai_action():
     # 微信对点击不敏感，若半秒内未获取到链接则补点一次
     url = None
     for attempt in range(2):
-        logger.info(f"[Linux] 点击 p2 ({config['p2']}) 打开链接"
-                     + (f" (第{attempt + 1}次)" if attempt > 0 else ""))
+        logger.info(
+            f"[Linux] 点击 p2 ({config['p2']}) 打开链接"
+            + (f" (第{attempt + 1}次)" if attempt > 0 else "")
+        )
         mouse.move_click(config["p2"][0], config["p2"][1], delay=0.5)
         try:
             url = _url_queue.get(timeout=0.5 if attempt == 0 else timeout)
@@ -784,6 +789,7 @@ qrmai_action = linux_qrmai_action
 # =============================================================================
 # Linux 屏幕截图（供 OpenCV 视觉识别使用）
 # =============================================================================
+
 
 def linux_capture_screen() -> "np.ndarray":
     """
@@ -874,6 +880,7 @@ def _capture_screen_mss(monitor: int = 1) -> "np.ndarray":
 # =============================================================================
 # 初始化辅助（供 main.py 调用）
 # =============================================================================
+
 
 def linux_setup():
     """Linux 启动时的初始化：建立劫持环境 + 启动微信

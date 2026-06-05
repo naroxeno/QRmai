@@ -8,16 +8,18 @@ from flask import (
     redirect,
     url_for,
     jsonify,
+    send_from_directory,
 )
 from functools import wraps
 from io import BytesIO
 from uuid import uuid4
-import sys
 import time
 import json
 import os
+import glob
+import re
 
-IS_LINUX = sys.platform == "linux"
+from qrmai.shared import IS_LINUX
 
 # 初始化Flask应用
 app = Flask(__name__)
@@ -134,8 +136,11 @@ def settings():
                     token_updated = True
             elif key == "qr_route":  # 处理新的配置项
                 _config[key] = value
-                # 二维码路由路径更改，需要更新路由
-                # 注意：在当前请求中无法动态修改路由，需要重启服务
+            elif key in ("skin_mode", "skin_index"):
+                if key == "skin_index":
+                    _config[key] = int(value)
+                else:
+                    _config[key] = value
 
         # 保存更新后的config到文件
         with open("config.json", "w", encoding="utf-8") as f:
@@ -180,7 +185,7 @@ def detect_positions():
 
         if p1 is None and p2 is None:
             return jsonify({
-                "error": "未能识别任何位置，请确认 templates_img/ 目录下有模板图"
+                "error": "未能识别任何位置，请确认 img/ 目录下有模板图"
             }), 422
 
         result = {}
@@ -197,13 +202,145 @@ def detect_positions():
         return jsonify({"error": str(e)}), 500
 
 
+# =============================================================================
+# 图片上传端点
+# =============================================================================
+
+def _ensure_img_dir():
+    """确保 img/ 目录存在"""
+    from qrmai.shared import resource_path
+    img_dir = resource_path("img")
+    os.makedirs(img_dir, exist_ok=True)
+    return img_dir
+
+
+def _next_skin_number():
+    """获取下一个可用的皮肤编号"""
+    img_dir = _ensure_img_dir()
+    existing = glob.glob(os.path.join(img_dir, "skin_*.png"))
+    nums = []
+    for path in existing:
+        m = re.search(r"skin_(\d+)\.png$", os.path.basename(path))
+        if m:
+            nums.append(int(m.group(1)))
+    return max(nums) + 1 if nums else 1
+
+
+@app.route("/img/<path:filename>")
+def serve_img(filename):
+    """提供 img/ 目录下的静态文件"""
+    from qrmai.shared import resource_path
+    return send_from_directory(resource_path("img"), filename)
+
+
+@app.route("/upload_p1", methods=["POST"])
+@require_auth
+def upload_p1():
+    """上传 P1 模板图片"""
+    if "file" not in request.files:
+        return jsonify({"error": "未选择文件"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "文件名为空"}), 400
+    img_dir = _ensure_img_dir()
+    filepath = os.path.join(img_dir, "p1_user.png")
+    file.save(filepath)
+    _config["p1_image"] = "p1_user.png"
+    _save_config()
+    _logger.info(f"[Server] P1 模板已上传: {filepath}")
+    return jsonify({"success": True, "filename": "p1_user.png"})
+
+
+@app.route("/upload_p2", methods=["POST"])
+@require_auth
+def upload_p2():
+    """上传 P2 模板图片"""
+    if "file" not in request.files:
+        return jsonify({"error": "未选择文件"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "文件名为空"}), 400
+    img_dir = _ensure_img_dir()
+    filepath = os.path.join(img_dir, "p2_user.png")
+    file.save(filepath)
+    _config["p2_image"] = "p2_user.png"
+    _save_config()
+    _logger.info(f"[Server] P2 模板已上传: {filepath}")
+    return jsonify({"success": True, "filename": "p2_user.png"})
+
+
+@app.route("/upload_skin", methods=["POST"])
+@require_auth
+def upload_skin():
+    """上传皮肤图片"""
+    if "file" not in request.files:
+        return jsonify({"error": "未选择文件"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "文件名为空"}), 400
+    img_dir = _ensure_img_dir()
+    num = _next_skin_number()
+    filename = f"skin_{num}.png"
+    filepath = os.path.join(img_dir, filename)
+    file.save(filepath)
+    skin_images = _config.get("skin_images", [])
+    skin_images.append(filename)
+    _config["skin_images"] = skin_images
+    _save_config()
+    _logger.info(f"[Server] 皮肤已上传: {filepath} (共 {len(skin_images)} 个)")
+    return jsonify({"success": True, "filename": filename, "index": len(skin_images) - 1, "total": len(skin_images)})
+
+
+@app.route("/delete_skin", methods=["POST"])
+@require_auth
+def delete_skin():
+    """删除皮肤或 P1/P2 用户模板图片"""
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename", "")
+    if not filename:
+        return jsonify({"error": "未指定文件名"}), 400
+
+    img_dir = _ensure_img_dir()
+    filepath = os.path.join(img_dir, filename)
+
+    # P1/P2 模板文件单独处理
+    if filename in ("p1_user.png", "p2_user.png"):
+        if os.path.isfile(filepath):
+            os.remove(filepath)
+        if filename == "p1_user.png":
+            _config["p1_image"] = ""
+        else:
+            _config["p2_image"] = ""
+        _save_config()
+        _logger.info(f"[Server] 用户模板已删除: {filename}")
+        return jsonify({"success": True})
+
+    skin_images = _config.get("skin_images", [])
+    if filename not in skin_images:
+        return jsonify({"error": "皮肤不存在"}), 404
+    if os.path.isfile(filepath):
+        os.remove(filepath)
+    skin_images.remove(filename)
+    _config["skin_images"] = skin_images
+    if _config.get("skin_index", 0) >= len(skin_images) and skin_images:
+        _config["skin_index"] = 0
+    _save_config()
+    _logger.info(f"[Server] 皮肤已删除: {filename} (剩余 {len(skin_images)} 个)")
+    return jsonify({"success": True, "remaining": len(skin_images)})
+
+
+def _save_config():
+    """保存配置到 config.json"""
+    with open("config.json", "w", encoding="utf-8") as f:
+        json.dump(_config, f, ensure_ascii=False, indent=4)
+
+
 @app.route("/check_update", methods=["POST"])
 @require_auth
 def check_update():
     """检查更新的路由"""
     try:
-        # 导入updater模块
-        import updater
+        from qrmai import updater
 
         # 检查是否有新版本
         has_update, latest_release = updater.is_new_version_available()
@@ -276,8 +413,7 @@ def qrmai():
 def manual_update():
     """手动更新的路由"""
     try:
-        # 导入updater模块
-        import updater
+        from qrmai import updater
 
         # 检查是否有新版本并执行更新
         has_update, latest_release = updater.is_new_version_available()

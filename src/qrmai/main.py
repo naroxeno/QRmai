@@ -8,6 +8,8 @@ import sys
 import json
 import time
 import hashlib
+from turtle import width
+from term_image.image import from_file
 
 from qrmai.shared import (
     IS_LINUX,
@@ -74,12 +76,13 @@ def main():
 
     template_folder = resource_path("templates")
     server.init(qrmai_action, capture_screen, config, logger, template_folder)
-
+    logo = from_file("icon.png", height=20)
+    logo.draw(h_align="left", pad_height=-10)
     # =========================================================================
     # Linux: 启动时初始化劫持环境并启动微信
     # =========================================================================
     if IS_LINUX:
-        linux_setup()
+        linux_setup()  # pyright: ignore[reportPossiblyUnboundVariable]
 
     # 根据配置动态注册二维码路由
     qr_route = config.get("qr_route", "/qrmai")
@@ -89,9 +92,9 @@ def main():
     from webbrowser import open as open_webbrowser
 
     if config["host"] != "0.0.0.0":
-        open_webbrowser(f'http://{config["host"]}:{config["port"]}/login')
+        open_webbrowser(f"http://{config['host']}:{config['port']}/login")
     else:
-        open_webbrowser(f'http://localhost:{config["port"]}/login')
+        open_webbrowser(f"http://localhost:{config['port']}/login")
 
     try:
         server.app.run(
