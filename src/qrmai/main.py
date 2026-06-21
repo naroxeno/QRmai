@@ -8,8 +8,6 @@ import sys
 import json
 import time
 import hashlib
-from turtle import width
-from term_image.image import from_file
 
 from qrmai.shared import (
     IS_LINUX,
@@ -76,8 +74,7 @@ def main():
 
     template_folder = resource_path("templates")
     server.init(qrmai_action, capture_screen, config, logger, template_folder)
-    logo = from_file("icon.png", height=20)
-    logo.draw(h_align="left", pad_height=-10)
+
     # =========================================================================
     # Linux: 启动时初始化劫持环境并启动微信
     # =========================================================================
@@ -102,7 +99,7 @@ def main():
         )
     finally:
         if IS_LINUX:
-            linux_shutdown()
+            linux_shutdown()  # pyright: ignore[reportPossiblyUnboundVariable]
 
 
 if __name__ == "__main__":

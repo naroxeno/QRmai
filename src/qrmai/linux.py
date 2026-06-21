@@ -3,28 +3,27 @@ QRmai Linux 平台代码
 hacked-wechat 劫持环境 + Wayland/uinput 鼠标操控
 """
 
-import os
-import sys
 import json
-import time
-import threading
+import os
 import queue
-
-import shutil
-import tempfile
-import subprocess
-import urllib.request
-import urllib.error
-from urllib.parse import urljoin
 import re
-from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
 from io import BytesIO
+from pathlib import Path
+from urllib.parse import urljoin
 
+import psutil
 from PIL import Image
 from pyzbar.pyzbar import decode
-import psutil
 
-from .shared import config, logger, apply_skin_to_qr, make_error_image
+from .shared import apply_skin_to_qr, config, logger, make_error_image
 
 # Linux 微信可执行文件路径（可从配置覆盖）
 WECHAT_BIN = config.get("wechat_bin", "/opt/wechat/wechat")
@@ -104,7 +103,8 @@ class LinuxMouse:
 
         # ── uinput 回退路径 ──
         try:
-            from evdev import UInput, ecodes as ev_ecodes
+            from evdev import UInput
+            from evdev import ecodes as ev_ecodes
 
             self._ev_ecodes = ev_ecodes
             self._ui = UInput(
@@ -124,7 +124,7 @@ class LinuxMouse:
         except ImportError:
             logger.error(
                 "evdev 库未安装，无法进行 Linux 鼠标操控。"
-                "请安装 evdev: pip install evdev"
+                "请安装 evdev: uv pip install evdev"
             )
             raise RuntimeError("evdev 库未安装，Linux 鼠标操控不可用")
         except Exception as e:
@@ -147,7 +147,8 @@ class LinuxMouse:
             except Exception:
                 return 0, 0
         try:
-            from evdev import InputDevice, list_devices, ecodes as ev_ecodes
+            from evdev import InputDevice, list_devices
+            from evdev import ecodes as ev_ecodes
 
             mice = [InputDevice(path) for path in list_devices()]
             for dev in mice:
@@ -272,12 +273,17 @@ def linux_kill_wechat_process():
 
 def _setup_fake_xdg_open(fake_bin_dir: Path, fifo_path: Path):
     """在工作目录内动态创建伪装的 xdg-open 脚本，拦截 HTTP(S) 链接写入 FIFO"""
-    fake_bin_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error(f"无法创建伪装 xdg-open 目录 {fake_bin_dir}: {e}")
+        raise RuntimeError(f"无法创建伪装目录: {e}") from e
+
     xdg_open_path = fake_bin_dir / "xdg-open"
 
     script_content = f"""#!/bin/bash
 URL="$1"
-if [[ "$URL" =~ ^https?:// ]]; then
+if [[ "$URL" =~ ^https?://wq\\.wahlap\\.net/qrcode/req/MAID[0-9A-Fa-f]+\\.html ]]; then
     echo "$URL" > "{fifo_path}"
     exit 0
 else
@@ -285,8 +291,18 @@ else
     exec /usr/bin/xdg-open "$@"
 fi
 """
-    xdg_open_path.write_text(script_content, encoding="utf-8")
-    xdg_open_path.chmod(0o755)
+    try:
+        xdg_open_path.write_text(script_content, encoding="utf-8")
+    except OSError as e:
+        logger.error(f"无法写入伪装 xdg-open 脚本 {xdg_open_path}: {e}")
+        raise RuntimeError(f"无法写入 xdg-open 脚本: {e}") from e
+
+    try:
+        xdg_open_path.chmod(0o755)
+    except OSError as e:
+        logger.error(f"无法设置 xdg-open 可执行权限 {xdg_open_path}: {e}")
+        raise RuntimeError(f"无法设置 xdg-open 权限: {e}") from e
+
     logger.info(f"已创建伪装的 xdg-open: {xdg_open_path}")
 
 
@@ -300,17 +316,19 @@ def _fetch_url_and_decode_qr(url: str) -> str:
     访问微信打开的链接，解析 HTML，下载 MAID 开头的二维码图像，
     使用 pyzbar 解码后返回二维码数据字符串。
     """
+    http_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 10; K) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Mobile Safari/537.36"
+        )
+    }
+
     logger.info(f"[Linux] 正在请求页面: {url[:80]}...")
 
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 10; K) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Mobile Safari/537.36"
-            )
-        },
+        headers=http_headers,
     )
 
     try:
@@ -339,13 +357,7 @@ def _fetch_url_and_decode_qr(url: str) -> str:
     # 下载二维码图片
     img_req = urllib.request.Request(
         img_url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 10; K) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Mobile Safari/537.36"
-            )
-        },
+        headers=http_headers,
     )
 
     try:
@@ -504,12 +516,12 @@ def _setup_hacked_environment():
 
         _setup_fake_xdg_open(_hacked_fake_bin_dir, _hacked_fifo_path)
 
-    def _persistent_listener():
+    def _persistent_listener(fifo_path):
         """持续从 FIFO 读取 URL，放入队列供多次请求消费"""
         logger.info("[Linux] 持久链接监听线程已启动")
-        while not _hacked_stop_event.is_set() and _hacked_fifo_path.exists():
+        while not _hacked_stop_event.is_set() and fifo_path.exists():
             try:
-                with open(_hacked_fifo_path, "r", encoding="utf-8") as fifo:
+                with open(fifo_path, "r", encoding="utf-8") as fifo:
                     for line in fifo:
                         if _hacked_stop_event.is_set():
                             break
@@ -521,8 +533,13 @@ def _setup_hacked_environment():
                 break
         logger.info("[Linux] 持久链接监听线程已退出")
 
-    listener = threading.Thread(target=_persistent_listener, daemon=True)
-    listener.start()
+    if _hacked_fifo_path is not None:
+        listener = threading.Thread(
+            target=_persistent_listener, args=(_hacked_fifo_path,), daemon=True
+        )
+        listener.start()
+    else:
+        logger.error("[Linux] FIFO 路径为空，监听线程无法启动")
 
 
 def _find_existing_wechat():
@@ -817,8 +834,8 @@ def _capture_screen_grim() -> "np.ndarray":
     Returns:
         BGR 图像 (H, W, 3) uint8
     """
-    import numpy as np
     import cv2
+    import numpy as np
 
     tmp_path = None
     try:
@@ -865,8 +882,8 @@ def _capture_screen_mss(monitor: int = 1) -> "np.ndarray":
     Returns:
         BGR 图像 (H, W, 3) uint8
     """
-    import numpy as np
     import cv2
+    import numpy as np
     from mss import mss
 
     with mss() as sct:

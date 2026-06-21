@@ -25,10 +25,8 @@ from qrmai.shared import IS_LINUX
 app = Flask(__name__)
 app.secret_key = str(uuid4())  # 在生产环境中应该使用更安全的密钥
 
-# 缓存相关全局变量
-request_lock = False  # 请求锁，防止并发访问
-last_qr_bytes = None  # 上次生成的二维码字节数据
-last_qr_time = 0  # 上次生成二维码的时间戳
+# 请求锁，防止并发访问
+request_lock = False
 
 # 以下变量由 main.py 通过 init() 注入
 _config = None
@@ -365,44 +363,28 @@ def check_update():
 def qrmai():
     """
     处理二维码路由请求的函数
-    包含身份验证、缓存机制和并发控制
+    每次请求均实时生成二维码，不使用缓存
     """
+    global request_lock
+
     # 验证token，如果与配置不符则返回403错误
     if request.args.get("token") != _config["token"]:
         return Response("403 Forbidden", status=403)
-
-    # 引入全局变量
-    global request_lock, last_qr_bytes, last_qr_time
-
-    # 获取当前时间戳
-    current_time = time.time()
-
-    # 获取缓存持续时间，默认60秒
-    cache_duration = _config.get("cache_duration", 60)
 
     # 如果有正在进行的请求，等待直到请求完成
     while request_lock:
         time.sleep(0.5)
         _logger.info("等待请求完成...")
 
-    # 检查缓存是否有效（存在且未过期）
-    if last_qr_bytes and (current_time - last_qr_time) < cache_duration:
-        # 返回缓存的二维码图像
-        return Response(BytesIO(last_qr_bytes), mimetype="image/png")
-
     # 设置请求锁，防止并发访问
     request_lock = True
     try:
         # 执行二维码获取操作
         img_io = _qrmai_action()
-        img_io.seek(0)  # 将指针移到开始位置
-
-        # 更新缓存数据
-        last_qr_bytes = img_io.getvalue()
-        last_qr_time = current_time
+        img_io.seek(0)
 
         # 返回新生成的二维码图像
-        return Response(BytesIO(last_qr_bytes), mimetype="image/png")
+        return Response(BytesIO(img_io.getvalue()), mimetype="image/png")
     finally:
         # 释放请求锁
         request_lock = False
