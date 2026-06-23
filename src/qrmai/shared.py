@@ -7,7 +7,6 @@ import os
 import json
 import time
 import logging
-import hashlib
 from io import BytesIO
 
 # =============================================================================
@@ -101,7 +100,6 @@ def get_default_config():
         "host": "0.0.0.0",
         "port": 5000,
         "qr_route": "/qrmai",
-        "cache_duration": 60,
         "standalone_mode": False,
         "decode": {"time": 10, "retry_count": 10},
         "skin_format": "new",
@@ -144,17 +142,6 @@ if os.path.exists(config_path):
         config = json.load(f)
 
 config = ensure_config_completeness(config)
-
-if "version" not in config:
-    try:
-        config_version = hashlib.md5(
-            (config["token"] + str(os.path.getmtime(config_path))).encode()
-        ).hexdigest()
-    except FileNotFoundError:
-        config_version = hashlib.md5(
-            (config["token"] + str(time.time())).encode()
-        ).hexdigest()
-    config["version"] = config_version
 
 
 # =============================================================================
@@ -472,76 +459,3 @@ def detect_p1p2(image, threshold=None):
         logger.warning("[OpenCV] 无 P2 模板图，跳过 P2 识别")
 
     return p1, p2
-
-
-def resolve_p1p2(capture_screen):
-    """
-    解析 P1/P2 点击坐标，供 qrmai_action 调用。
-
-    优先级：
-      1. config.json 中的 p1 / p2（非空时直接使用）
-      2. OpenCV 自动识别
-
-    Args:
-        capture_screen: 平台截图函数，返回 BGR ndarray
-
-    Returns:
-        (p1, p2) — 各自为 [x, y]
-
-    Raises:
-        RuntimeError: 两种方式均无法获取坐标
-    """
-    p1_cfg = config.get("p1")
-    p2_cfg = config.get("p2")
-
-    # 检查 config 中是否有有效坐标（非 None、非空列表、长度为 2）
-    p1_valid = (
-        p1_cfg is not None
-        and isinstance(p1_cfg, (list, tuple))
-        and len(p1_cfg) == 2
-        and all(isinstance(v, (int, float)) for v in p1_cfg)
-    )
-    p2_valid = (
-        p2_cfg is not None
-        and isinstance(p2_cfg, (list, tuple))
-        and len(p2_cfg) == 2
-        and all(isinstance(v, (int, float)) for v in p2_cfg)
-    )
-
-    if p1_valid and p2_valid:
-        logger.info(f"[OpenCV] 使用 config 坐标: P1={p1_cfg}, P2={p2_cfg}")
-        return list(p1_cfg), list(p2_cfg)
-
-    # config 坐标不完整，尝试 OpenCV 识别
-    logger.info(
-        "[OpenCV] config 坐标不完整 (P1={}, P2={})，尝试自动识别".format(
-            "有效" if p1_valid else "无效",
-            "有效" if p2_valid else "无效",
-        )
-    )
-
-    screen = capture_screen()
-    detected_p1, detected_p2 = detect_p1p2(screen)
-
-    if detected_p1 is None:
-        if p1_valid:
-            detected_p1 = list(p1_cfg)
-            logger.warning(f"[OpenCV] P1 识别失败，回退到 config: {detected_p1}")
-        else:
-            raise RuntimeError(
-                "无法获取 P1 坐标：config 为空且 OpenCV 识别失败，"
-                "请在 config.json 中设置 p1 或通过设置页面上传模板图到 img/"
-            )
-
-    if detected_p2 is None:
-        if p2_valid:
-            detected_p2 = list(p2_cfg)
-            logger.warning(f"[OpenCV] P2 识别失败，回退到 config: {detected_p2}")
-        else:
-            raise RuntimeError(
-                "无法获取 P2 坐标：config 为空且 OpenCV 识别失败，"
-                "请在 config.json 中设置 p2 或通过设置页面上传模板图到 img/"
-            )
-
-    logger.info(f"[OpenCV] 最终坐标: P1={detected_p1}, P2={detected_p2}")
-    return detected_p1, detected_p2

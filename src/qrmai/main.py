@@ -44,24 +44,21 @@ def main():
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_merged, f, ensure_ascii=False, indent=4)
         config.update(config_merged)
-        try:
-            config_version = hashlib.md5(
-                (config["token"] + str(os.path.getmtime(config_path))).encode()
-            ).hexdigest()
-        except FileNotFoundError:
-            config_version = hashlib.md5(
-                (config["token"] + str(time.time())).encode()
-            ).hexdigest()
-        config["version"] = config_version
     else:
         default_cfg = get_default_config()
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(default_cfg, f, ensure_ascii=False, indent=4)
         config.update(default_cfg)
-        config_version = hashlib.md5(
+
+    # 计算配置版本（用于会话安全校验）
+    try:
+        config["version"] = hashlib.md5(
+            (config["token"] + str(os.path.getmtime(config_path))).encode()
+        ).hexdigest()
+    except FileNotFoundError:
+        config["version"] = hashlib.md5(
             (config["token"] + str(time.time())).encode()
         ).hexdigest()
-        config["version"] = config_version
 
     # 初始化 server 模块，注入依赖
     from qrmai import server

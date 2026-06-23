@@ -131,37 +131,6 @@ class LinuxMouse:
             logger.error(f"初始化 uinput 失败: {e}")
             raise RuntimeError(f"初始化 uinput 失败: {e}")
 
-    @staticmethod
-    def _get_mouse_position():
-        """获取当前鼠标位置，返回 (x, y)，失败返回 (0, 0)"""
-        if _is_wayland_session():
-            try:
-                from wayland_automation import mouse_position_generator
-
-                gen = mouse_position_generator(interval=0.05)
-                try:
-                    pos = next(gen)
-                    return pos if pos else (0, 0)
-                finally:
-                    gen.close()
-            except Exception:
-                return 0, 0
-        try:
-            from evdev import InputDevice, list_devices
-            from evdev import ecodes as ev_ecodes
-
-            mice = [InputDevice(path) for path in list_devices()]
-            for dev in mice:
-                caps = dev.capabilities()
-                if ev_ecodes.EV_REL in caps and ev_ecodes.BTN_LEFT in caps.get(
-                    ev_ecodes.EV_KEY, []
-                ):
-                    dev.close()
-                    break
-            return 0, 0
-        except Exception:
-            return 0, 0
-
     def move_to(self, x: int, y: int):
         """将鼠标移动到屏幕绝对坐标"""
         self._last_x = x
@@ -770,9 +739,10 @@ def linux_qrmai_action():
             f"[Linux] 点击 p2 ({config['p2']}) 打开链接"
             + (f" (第{attempt + 1}次)" if attempt > 0 else "")
         )
-        mouse.move_click(config["p2"][0], config["p2"][1], delay=0.5)
+        mouse.move_click(config["p2"][0], config["p2"][1], delay=0)
+        mouse.move_click(config["p2"][0], config["p2"][1], delay=0)
         try:
-            url = _url_queue.get(timeout=0.5 if attempt == 0 else timeout)
+            url = _url_queue.get(timeout=1 if attempt == 0 else timeout)
             break
         except queue.Empty:
             if attempt == 0:

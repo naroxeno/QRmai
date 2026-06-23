@@ -1,23 +1,24 @@
 # Flask框架相关模块
-from flask import (
-    Flask,
-    render_template,
-    request,
-    Response,
-    session,
-    redirect,
-    url_for,
-    jsonify,
-    send_from_directory,
-)
+import glob
+import json
+import os
+import re
+import threading
 from functools import wraps
 from io import BytesIO
 from uuid import uuid4
-import time
-import json
-import os
-import glob
-import re
+
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
 
 from qrmai.shared import IS_LINUX
 
@@ -26,7 +27,7 @@ app = Flask(__name__)
 app.secret_key = str(uuid4())  # 在生产环境中应该使用更安全的密钥
 
 # 请求锁，防止并发访问
-request_lock = False
+request_lock = threading.Lock()
 
 # 以下变量由 main.py 通过 init() 注入
 _config = None
@@ -164,13 +165,28 @@ def settings():
     return render_template("settings.html", config=_config, is_linux=IS_LINUX)
 
 
-@app.route("/detect_positions", methods=["POST"])
-@require_auth
+def _check_auth():
+    """双通道认证：session（设置页面）或 token（直接 API 调用）"""
+    if request.args.get("token") == _config.get("token"):
+        return True
+    if "authenticated" in session:
+        if "config_version" in session and session["config_version"] == _config.get("version"):
+            return True
+    return False
+
+
+@app.route("/detect_positions", endpoint="detect_positions", methods=["GET", "POST"])
 def detect_positions():
     """
-    OpenCV 自动识别 P1/P2 坐标。
-    返回 JSON: {"p1": [x, y], "p2": [x, y]} 或 {"error": "..."}
+    OpenCV 自动识别 P1/P2 坐标并直接保存到配置（无需确认）。
+
+    认证方式：
+      - 设置页面调用：通过 session 认证
+      - 直接 API 调用：通过 ?token= 查询参数认证（与 /qrmai 一致）
     """
+    if not _check_auth():
+        return jsonify({"error": "未授权"}), 403
+
     from qrmai.shared import detect_p1p2
 
     if _capture_screen is None:
@@ -186,19 +202,28 @@ def detect_positions():
                 "error": "未能识别任何位置，请确认 img/ 目录下有模板图"
             }), 422
 
-        result = {}
+        # 自动保存识别结果到配置
+        saved = []
+        if p1 is not None:
+            _config["p1"] = p1
+            saved.append("p1")
+        if p2 is not None:
+            _config["p2"] = p2
+            saved.append("p2")
+        _save_config()
+
+        result = {"success": True, "saved": saved}
         if p1 is not None:
             result["p1"] = p1
         if p2 is not None:
             result["p2"] = p2
 
-        _logger.info(f"[Server] 识别结果: {result}")
+        _logger.info(f"[Server] 识别并保存结果: {result}")
         return jsonify(result)
 
     except Exception as e:
         _logger.error(f"[Server] 自动识别失败: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 # =============================================================================
 # 图片上传端点
@@ -365,29 +390,14 @@ def qrmai():
     处理二维码路由请求的函数
     每次请求均实时生成二维码，不使用缓存
     """
-    global request_lock
-
     # 验证token，如果与配置不符则返回403错误
     if request.args.get("token") != _config["token"]:
         return Response("403 Forbidden", status=403)
 
-    # 如果有正在进行的请求，等待直到请求完成
-    while request_lock:
-        time.sleep(0.5)
-        _logger.info("等待请求完成...")
-
-    # 设置请求锁，防止并发访问
-    request_lock = True
-    try:
-        # 执行二维码获取操作
+    with request_lock:
         img_io = _qrmai_action()
         img_io.seek(0)
-
-        # 返回新生成的二维码图像
         return Response(BytesIO(img_io.getvalue()), mimetype="image/png")
-    finally:
-        # 释放请求锁
-        request_lock = False
 
 
 @app.route("/manual_update", methods=["POST"])
